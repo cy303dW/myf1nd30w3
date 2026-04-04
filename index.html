@@ -1157,7 +1157,7 @@ async function testConnection() {
     const res = await fetch(SHEETS_URL, {
       method: 'POST',
       redirect: 'follow',
-      body: JSON.stringify({ action: 'getData' })
+      body: JSON.stringify({ action: 'addTransactionsBatch', data: [] })
     });
     const data = await res.json();
     if (data.status === 'ok') {
