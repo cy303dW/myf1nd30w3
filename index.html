@@ -1063,32 +1063,43 @@ function checkRecurring() {
 
 function renderAll() { renderDashboard(); renderHistory(); }
 
-// JSONP helper — sidesteps CORS entirely by injecting a <script> tag
+// JSONP helper — sidesteps CORS by injecting a <script> tag
+// Uses a unique script id per call so parallel calls don't clash
 function jsonpFetch(url, params) {
   return new Promise((resolve, reject) => {
-    const cbName = 'kopi_cb_' + Date.now();
-    const timeout = setTimeout(() => {
+    const cbName = 'kopi_cb_' + Date.now() + '_' + Math.floor(Math.random()*10000);
+    const scriptId = cbName + '_script';
+
+    const cleanup = () => {
       delete window[cbName];
-      document.getElementById('jsonp-script')?.remove();
-      reject(new Error('Request timed out'));
-    }, 12000);
+      const el = document.getElementById(scriptId);
+      if (el) el.remove();
+    };
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Request timed out after 15s'));
+    }, 15000);
 
     window[cbName] = function(data) {
       clearTimeout(timeout);
-      delete window[cbName];
-      document.getElementById('jsonp-script')?.remove();
+      cleanup();
       resolve(data);
     };
 
     const qs = Object.entries({ ...params, callback: cbName })
       .map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+
     const script = document.createElement('script');
-    script.id = 'jsonp-script';
+    script.id = scriptId;
+    // Apps Script redirects to script.googleusercontent.com —
+    // setting crossOrigin to anonymous helps the browser follow it
+    script.crossOrigin = 'anonymous';
     script.src = url + '?' + qs;
-    script.onerror = () => {
+    script.onerror = (err) => {
       clearTimeout(timeout);
-      delete window[cbName];
-      reject(new Error('Script load failed'));
+      cleanup();
+      reject(new Error('Script load failed — check deployment access is set to Anyone'));
     };
     document.head.appendChild(script);
   });
