@@ -1067,7 +1067,11 @@ async function testConnection() {
   setSyncStatus('syncing', 'Testing…');
   toast('Testing connection…');
   try {
-    const res = await fetch(SHEETS_URL + '?action=getTransactions');
+    const res = await fetch(SHEETS_URL, {
+      method: 'POST',
+      redirect: 'follow',
+      body: JSON.stringify({ action: 'getData' })
+    });
     const data = await res.json();
     if (data.status === 'ok') {
       setSyncStatus('ok', 'Connected ✓');
@@ -1087,36 +1091,66 @@ async function restoreFromSheets() {
   setSyncStatus('syncing', 'Restoring…');
   toast('Fetching data from Sheets…');
   try {
-    // Fetch transactions
-    const txRes = await fetch(SHEETS_URL + '?action=getTransactions');
-    const txData = await txRes.json();
-    if (txData.status !== 'ok') throw new Error('transactions fetch failed');
+    // Use no-cors mode isn’t possible with JSON, so we use a JSONP-style GET with callback workaround
+    // Apps Script redirects POST to GET — follow redirects manually
+    const res = await fetch(SHEETS_URL, {
+      method: 'POST',
+      redirect: 'follow',
+      body: JSON.stringify({ action: 'getData' })
+    });
 
-    // Fetch loans
-    const loanRes = await fetch(SHEETS_URL + '?action=getLoans');
-    const loanData = await loanRes.json();
-    if (loanData.status !== 'ok') throw new Error('loans fetch failed');
+    const raw = await res.text();
 
-    // Parse transactions
-    const txs = (txData.data || [])
-      .filter(row => row.Date && row.Amount)
-      .map((row, i) => ({
-        id: Date.now() + i,
-        date: String(row.Date).trim(),
-        type: String(row.Type || 'expense').trim().toLowerCase(),
-        category: String(row.Category || 'Others').trim(),
-        desc: String(row.Description || '').trim(),
-        amount: parseFloat(row.Amount) || 0,
-        note: String(row.Note || '').trim(),
-        recurring: String(row.Recurring || '').toLowerCase() === 'yes',
-        offline: false
-      }))
-      .filter(t => t.amount > 0);
+    // Show raw response in a debug modal so user can see exactly what came back
+    let payload;
+    try {
+      payload = JSON.parse(raw);
+    } catch(parseErr) {
+      // Show what we actually got back to help diagnose
+      document.getElementById('modal-title').textContent = 'Debug: raw response';
+      document.getElementById('modal-body').innerHTML = `<pre style="font-size:11px;color:var(--text2);white-space:pre-wrap;word-break:break-all;background:var(--bg3);padding:12px;border-radius:8px;max-height:300px;overflow-y:auto;">${raw.substring(0,2000)}</pre><p style="font-size:13px;color:var(--text3);margin-top:10px;">The response above is not valid JSON. Share this with support.</p>`;
+      document.getElementById('modal-overlay').classList.add('show');
+      setSyncStatus('error', 'Restore failed');
+      return;
+    }
+
+    if (payload.status !== 'ok') {
+      document.getElementById('modal-title').textContent = 'Debug: script error';
+      document.getElementById('modal-body').innerHTML = `<pre style="font-size:11px;color:var(--text2);white-space:pre-wrap;background:var(--bg3);padding:12px;border-radius:8px;">${JSON.stringify(payload, null, 2)}</pre>`;
+      document.getElementById('modal-overlay').classList.add('show');
+      setSyncStatus('error', 'Restore failed');
+      return;
+    }
+
+    // Parse transactions — handle Sheets date serials and stringified numbers
+    const txs = (payload.transactions || [])
+      .map((row, i) => {
+        let date = String(row.Date || '').trim();
+        // Sheets serial date (e.g. 45678)
+        if (/^\d{5}$/.test(date)) {
+          const d = new Date((parseInt(date) - 25569) * 86400 * 1000);
+          date = d.toISOString().split('T')[0];
+        }
+        // Sheets ISO string with time (e.g. "2024-04-01T00:00:00.000Z")
+        if (date.includes('T')) date = date.split('T')[0];
+        return {
+          id: Date.now() + i,
+          date,
+          type: String(row.Type || 'expense').trim().toLowerCase(),
+          category: String(row.Category || 'Others').trim(),
+          desc: String(row.Description || '').trim(),
+          amount: parseFloat(row.Amount) || 0,
+          note: String(row.Note || '').trim(),
+          recurring: String(row.Recurring || '').toLowerCase() === 'yes',
+          offline: false
+        };
+      })
+      .filter(t => t.amount > 0 && t.date);
 
     // Parse loans
     const oweLoans = [];
     const owedLoans = [];
-    (loanData.data || []).filter(row => row.Person && row.Total).forEach((row, i) => {
+    (payload.loans || []).forEach((row, i) => {
       const loan = {
         id: String(Date.now() + i + 10000),
         person: String(row.Person || '').trim(),
@@ -1125,8 +1159,10 @@ async function restoreFromSheets() {
         due: String(row['Due Date'] || '').trim(),
         notes: String(row.Notes || '').trim()
       };
-      if (String(row.Direction || '').includes('Owe')) oweLoans.push(loan);
-      else owedLoans.push(loan);
+      if (loan.total > 0 && loan.person) {
+        if (String(row.Direction || '').includes('Owe')) oweLoans.push(loan);
+        else owedLoans.push(loan);
+      }
     });
 
     // Apply to state
@@ -1137,13 +1173,16 @@ async function restoreFromSheets() {
     save();
 
     setSyncStatus('ok', 'Restored ✓');
-    toast(`Restored ${txs.length} transactions & ${oweLoans.length + owedLoans.length} loans ✓`);
+    toast(`Restored ${txs.length} transaction${txs.length===1?'':'s'} & ${oweLoans.length + owedLoans.length} loan${oweLoans.length+owedLoans.length===1?'':'s'} ✓`);
     renderAll();
     renderLoans();
     updateSyncInfo();
   } catch(e) {
     setSyncStatus('error', 'Restore failed');
-    toast('Restore failed — check your connection and try again');
+    // Show the actual JS error in the modal for diagnosis
+    document.getElementById('modal-title').textContent = 'Debug: error details';
+    document.getElementById('modal-body').innerHTML = `<pre style="font-size:12px;color:var(--red);white-space:pre-wrap;background:var(--bg3);padding:12px;border-radius:8px;">${e.message}\n\n${e.stack||''}</pre><p style="font-size:13px;color:var(--text3);margin-top:10px;">Share this error message for support.</p>`;
+    document.getElementById('modal-overlay').classList.add('show');
   }
 }
 
