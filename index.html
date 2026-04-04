@@ -415,7 +415,10 @@ input:checked+.slider:before{transform:translateX(18px);background:#000;}
             <button class="sync-btn" onclick="syncNow()" style="flex:1;text-align:center;">Sync queue now</button>
             <button class="sync-btn" onclick="testConnection()" style="flex:1;text-align:center;background:var(--blue-bg);color:var(--blue);border-color:rgba(90,138,176,0.3);">Test connection</button>
           </div>
-          <button class="sync-btn" onclick="restoreFromSheets()" style="width:100%;text-align:center;background:var(--purple-bg);color:var(--purple);border-color:rgba(155,122,205,0.3);padding:10px;">⬇ Restore all data from Google Sheets</button>
+          <label style="width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--purple-bg);color:var(--purple);border:1px solid rgba(155,122,205,0.3);border-radius:var(--radius-sm);padding:10px;cursor:pointer;font-size:12px;font-weight:600;font-family:var(--font-body);">
+            ⬇ Import transactions from Excel (.xlsx)
+            <input type="file" id="import-file" accept=".xlsx" style="display:none;" onchange="importFromExcel(this)"/>
+          </label>
           <div class="sync-info" id="sync-info" style="margin-top:10px;">0 pending entries</div>
         </div>
       </div>
@@ -1063,130 +1066,107 @@ function checkRecurring() {
 
 function renderAll() { renderDashboard(); renderHistory(); }
 
-// JSONP helper — sidesteps CORS by injecting a <script> tag
-// Uses a unique script id per call so parallel calls don't clash
-function jsonpFetch(url, params) {
-  return new Promise((resolve, reject) => {
-    const cbName = 'kopi_cb_' + Date.now() + '_' + Math.floor(Math.random()*10000);
-    const scriptId = cbName + '_script';
+async function importFromExcel(input) {
+  const file = input.files[0];
+  if (!file) return;
+  input.value = ''; // reset so same file can be re-imported
 
-    const cleanup = () => {
-      delete window[cbName];
-      const el = document.getElementById(scriptId);
-      if (el) el.remove();
-    };
+  if (!window.XLSX) { toast('Excel library not loaded yet — try again in a moment'); return; }
 
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error('Request timed out after 15s'));
-    }, 15000);
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
 
-    window[cbName] = function(data) {
-      clearTimeout(timeout);
-      cleanup();
-      resolve(data);
-    };
+      // Read Transactions sheet
+      const txSheet = wb.Sheets['Transactions'];
+      if (!txSheet) { toast('No "Transactions" sheet found in file'); return; }
+      const txRows = XLSX.utils.sheet_to_json(txSheet, { raw: false, dateNF: 'yyyy-mm-dd' });
 
-    const qs = Object.entries({ ...params, callback: cbName })
-      .map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+      const txs = txRows
+        .map((row, i) => {
+          let date = String(row['Date'] || '').trim();
+          // Normalise date formats
+          if (date.includes('/')) {
+            const parts = date.split('/');
+            if (parts.length === 3) date = `${parts[2]}-${parts[1].padStart(2,'0')}-${parts[0].padStart(2,'0')}`;
+          }
+          if (date.includes('T')) date = date.split('T')[0];
+          return {
+            id: Date.now() + i,
+            date,
+            type: String(row['Type'] || 'expense').trim().toLowerCase(),
+            category: String(row['Category'] || 'Others').trim(),
+            desc: String(row['Description'] || '').trim(),
+            amount: parseFloat(row['Amount']) || 0,
+            note: String(row['Note'] || '').trim(),
+            recurring: String(row['Recurring'] || '').toLowerCase() === 'yes',
+            offline: false
+          };
+        })
+        .filter(t => t.amount > 0 && t.date);
 
-    const script = document.createElement('script');
-    script.id = scriptId;
-    // Apps Script redirects to script.googleusercontent.com —
-    // setting crossOrigin to anonymous helps the browser follow it
-    script.crossOrigin = 'anonymous';
-    script.src = url + '?' + qs;
-    script.onerror = (err) => {
-      clearTimeout(timeout);
-      cleanup();
-      reject(new Error('Script load failed — check deployment access is set to Anyone'));
-    };
-    document.head.appendChild(script);
-  });
+      // Read Loans sheet if present
+      const loanSheet = wb.Sheets['Loans'];
+      const oweLoans = [], owedLoans = [];
+      if (loanSheet) {
+        const loanRows = XLSX.utils.sheet_to_json(loanSheet, { raw: false });
+        loanRows.forEach((row, i) => {
+          const loan = {
+            id: String(Date.now() + i + 10000),
+            person: String(row['Person'] || '').trim(),
+            total: parseFloat(row['Total Amount'] || row['Total']) || 0,
+            paid: parseFloat(row['Amount Paid'] || row['Paid']) || 0,
+            due: String(row['Due Date'] || '').trim(),
+            notes: String(row['Notes'] || '').trim()
+          };
+          if (loan.total > 0 && loan.person) {
+            if (String(row['Direction'] || '').includes('Owe')) oweLoans.push(loan);
+            else owedLoans.push(loan);
+          }
+        });
+      }
+
+      if (!txs.length) { toast('No valid transactions found in file'); return; }
+
+      if (!confirm(`Import ${txs.length} transaction${txs.length===1?'':'s'} and ${oweLoans.length+owedLoans.length} loan${oweLoans.length+owedLoans.length===1?'':'s'}? This will replace all local data.`)) return;
+
+      state.transactions = txs;
+      state.offlineQueue = [];
+      if (loanSheet) state.loans = { owe: oweLoans, owed: owedLoans };
+      state.lastSync = new Date().toISOString();
+      save();
+
+      setSyncStatus('ok', 'Imported ✓');
+      toast(`Imported ${txs.length} transaction${txs.length===1?'':'s'} ✓`);
+      renderAll();
+      renderLoans();
+      updateSyncInfo();
+    } catch(err) {
+      toast('Import failed — make sure this is a Kopi Money export file');
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
 }
 
 async function testConnection() {
   setSyncStatus('syncing', 'Testing…');
   toast('Testing connection…');
   try {
-    const data = await jsonpFetch(SHEETS_URL, { action: 'ping' });
+    const res = await fetch(SHEETS_URL, {
+      method: 'POST',
+      redirect: 'follow',
+      body: JSON.stringify({ action: 'getData' })
+    });
+    const data = await res.json();
     if (data.status === 'ok') {
       setSyncStatus('ok', 'Connected ✓');
       toast('Connected to Google Sheets ✓');
-    } else {
-      throw new Error('bad response');
-    }
+    } else throw new Error('bad response');
   } catch(e) {
     setSyncStatus('error', 'Connection failed');
     toast('Could not reach Google Sheets — check your script URL');
-  }
-}
-
-async function restoreFromSheets() {
-  if (!navigator.onLine) { toast('You’re offline — connect to restore'); return; }
-  if (!confirm('This will replace all local transactions and loans with data from Google Sheets. Any unsynced local entries will be lost. Continue?')) return;
-  setSyncStatus('syncing', 'Restoring…');
-  toast('Fetching data from Sheets…');
-  try {
-    const payload = await jsonpFetch(SHEETS_URL, { action: 'getData' });
-    if (payload.status !== 'ok') throw new Error('Script returned error: ' + (payload.message || 'unknown'));
-
-    // Parse transactions
-    const txs = (payload.transactions || [])
-      .map((row, i) => {
-        let date = String(row.Date || '').trim();
-        if (/^\d{5}$/.test(date)) {
-          const d = new Date((parseInt(date) - 25569) * 86400 * 1000);
-          date = d.toISOString().split('T')[0];
-        }
-        if (date.includes('T')) date = date.split('T')[0];
-        return {
-          id: Date.now() + i,
-          date,
-          type: String(row.Type || 'expense').trim().toLowerCase(),
-          category: String(row.Category || 'Others').trim(),
-          desc: String(row.Description || '').trim(),
-          amount: parseFloat(row.Amount) || 0,
-          note: String(row.Note || '').trim(),
-          recurring: String(row.Recurring || '').toLowerCase() === 'yes',
-          offline: false
-        };
-      })
-      .filter(t => t.amount > 0 && t.date);
-
-    // Parse loans
-    const oweLoans = [], owedLoans = [];
-    (payload.loans || []).forEach((row, i) => {
-      const loan = {
-        id: String(Date.now() + i + 10000),
-        person: String(row.Person || '').trim(),
-        total: parseFloat(row.Total) || 0,
-        paid: parseFloat(row.Paid) || 0,
-        due: String(row['Due Date'] || '').trim(),
-        notes: String(row.Notes || '').trim()
-      };
-      if (loan.total > 0 && loan.person) {
-        if (String(row.Direction || '').includes('Owe')) oweLoans.push(loan);
-        else owedLoans.push(loan);
-      }
-    });
-
-    state.transactions = txs;
-    state.offlineQueue = [];
-    state.loans = { owe: oweLoans, owed: owedLoans };
-    state.lastSync = new Date().toISOString();
-    save();
-
-    setSyncStatus('ok', 'Restored ✓');
-    toast(`Restored ${txs.length} transaction${txs.length===1?'':'s'} & ${oweLoans.length+owedLoans.length} loan${oweLoans.length+owedLoans.length===1?'':'s'} ✓`);
-    renderAll();
-    renderLoans();
-    updateSyncInfo();
-  } catch(e) {
-    setSyncStatus('error', 'Restore failed');
-    document.getElementById('modal-title').textContent = 'Restore error';
-    document.getElementById('modal-body').innerHTML = `<pre style="font-size:12px;color:var(--red);white-space:pre-wrap;background:var(--bg3);padding:12px;border-radius:8px;">${e.message}</pre><p style="font-size:13px;color:var(--text3);margin-top:10px;">Make sure you’ve redeployed the Apps Script after the latest update.</p>`;
-    document.getElementById('modal-overlay').classList.add('show');
   }
 }
 
