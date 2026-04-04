@@ -1063,16 +1063,42 @@ function checkRecurring() {
 
 function renderAll() { renderDashboard(); renderHistory(); }
 
+// JSONP helper — sidesteps CORS entirely by injecting a <script> tag
+function jsonpFetch(url, params) {
+  return new Promise((resolve, reject) => {
+    const cbName = 'kopi_cb_' + Date.now();
+    const timeout = setTimeout(() => {
+      delete window[cbName];
+      document.getElementById('jsonp-script')?.remove();
+      reject(new Error('Request timed out'));
+    }, 12000);
+
+    window[cbName] = function(data) {
+      clearTimeout(timeout);
+      delete window[cbName];
+      document.getElementById('jsonp-script')?.remove();
+      resolve(data);
+    };
+
+    const qs = Object.entries({ ...params, callback: cbName })
+      .map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+    const script = document.createElement('script');
+    script.id = 'jsonp-script';
+    script.src = url + '?' + qs;
+    script.onerror = () => {
+      clearTimeout(timeout);
+      delete window[cbName];
+      reject(new Error('Script load failed'));
+    };
+    document.head.appendChild(script);
+  });
+}
+
 async function testConnection() {
   setSyncStatus('syncing', 'Testing…');
   toast('Testing connection…');
   try {
-    const res = await fetch(SHEETS_URL, {
-      method: 'POST',
-      redirect: 'follow',
-      body: JSON.stringify({ action: 'getData' })
-    });
-    const data = await res.json();
+    const data = await jsonpFetch(SHEETS_URL, { action: 'ping' });
     if (data.status === 'ok') {
       setSyncStatus('ok', 'Connected ✓');
       toast('Connected to Google Sheets ✓');
@@ -1091,47 +1117,17 @@ async function restoreFromSheets() {
   setSyncStatus('syncing', 'Restoring…');
   toast('Fetching data from Sheets…');
   try {
-    // Use no-cors mode isn’t possible with JSON, so we use a JSONP-style GET with callback workaround
-    // Apps Script redirects POST to GET — follow redirects manually
-    const res = await fetch(SHEETS_URL, {
-      method: 'POST',
-      redirect: 'follow',
-      body: JSON.stringify({ action: 'getData' })
-    });
+    const payload = await jsonpFetch(SHEETS_URL, { action: 'getData' });
+    if (payload.status !== 'ok') throw new Error('Script returned error: ' + (payload.message || 'unknown'));
 
-    const raw = await res.text();
-
-    // Show raw response in a debug modal so user can see exactly what came back
-    let payload;
-    try {
-      payload = JSON.parse(raw);
-    } catch(parseErr) {
-      // Show what we actually got back to help diagnose
-      document.getElementById('modal-title').textContent = 'Debug: raw response';
-      document.getElementById('modal-body').innerHTML = `<pre style="font-size:11px;color:var(--text2);white-space:pre-wrap;word-break:break-all;background:var(--bg3);padding:12px;border-radius:8px;max-height:300px;overflow-y:auto;">${raw.substring(0,2000)}</pre><p style="font-size:13px;color:var(--text3);margin-top:10px;">The response above is not valid JSON. Share this with support.</p>`;
-      document.getElementById('modal-overlay').classList.add('show');
-      setSyncStatus('error', 'Restore failed');
-      return;
-    }
-
-    if (payload.status !== 'ok') {
-      document.getElementById('modal-title').textContent = 'Debug: script error';
-      document.getElementById('modal-body').innerHTML = `<pre style="font-size:11px;color:var(--text2);white-space:pre-wrap;background:var(--bg3);padding:12px;border-radius:8px;">${JSON.stringify(payload, null, 2)}</pre>`;
-      document.getElementById('modal-overlay').classList.add('show');
-      setSyncStatus('error', 'Restore failed');
-      return;
-    }
-
-    // Parse transactions — handle Sheets date serials and stringified numbers
+    // Parse transactions
     const txs = (payload.transactions || [])
       .map((row, i) => {
         let date = String(row.Date || '').trim();
-        // Sheets serial date (e.g. 45678)
         if (/^\d{5}$/.test(date)) {
           const d = new Date((parseInt(date) - 25569) * 86400 * 1000);
           date = d.toISOString().split('T')[0];
         }
-        // Sheets ISO string with time (e.g. "2024-04-01T00:00:00.000Z")
         if (date.includes('T')) date = date.split('T')[0];
         return {
           id: Date.now() + i,
@@ -1148,8 +1144,7 @@ async function restoreFromSheets() {
       .filter(t => t.amount > 0 && t.date);
 
     // Parse loans
-    const oweLoans = [];
-    const owedLoans = [];
+    const oweLoans = [], owedLoans = [];
     (payload.loans || []).forEach((row, i) => {
       const loan = {
         id: String(Date.now() + i + 10000),
@@ -1165,7 +1160,6 @@ async function restoreFromSheets() {
       }
     });
 
-    // Apply to state
     state.transactions = txs;
     state.offlineQueue = [];
     state.loans = { owe: oweLoans, owed: owedLoans };
@@ -1173,15 +1167,14 @@ async function restoreFromSheets() {
     save();
 
     setSyncStatus('ok', 'Restored ✓');
-    toast(`Restored ${txs.length} transaction${txs.length===1?'':'s'} & ${oweLoans.length + owedLoans.length} loan${oweLoans.length+owedLoans.length===1?'':'s'} ✓`);
+    toast(`Restored ${txs.length} transaction${txs.length===1?'':'s'} & ${oweLoans.length+owedLoans.length} loan${oweLoans.length+owedLoans.length===1?'':'s'} ✓`);
     renderAll();
     renderLoans();
     updateSyncInfo();
   } catch(e) {
     setSyncStatus('error', 'Restore failed');
-    // Show the actual JS error in the modal for diagnosis
-    document.getElementById('modal-title').textContent = 'Debug: error details';
-    document.getElementById('modal-body').innerHTML = `<pre style="font-size:12px;color:var(--red);white-space:pre-wrap;background:var(--bg3);padding:12px;border-radius:8px;">${e.message}\n\n${e.stack||''}</pre><p style="font-size:13px;color:var(--text3);margin-top:10px;">Share this error message for support.</p>`;
+    document.getElementById('modal-title').textContent = 'Restore error';
+    document.getElementById('modal-body').innerHTML = `<pre style="font-size:12px;color:var(--red);white-space:pre-wrap;background:var(--bg3);padding:12px;border-radius:8px;">${e.message}</pre><p style="font-size:13px;color:var(--text3);margin-top:10px;">Make sure you’ve redeployed the Apps Script after the latest update.</p>`;
     document.getElementById('modal-overlay').classList.add('show');
   }
 }
