@@ -184,6 +184,12 @@ input:checked+.slider:before{transform:translateX(18px);background:#000;}
 .sb-soon{background:var(--accent-bg);color:var(--accent);}
 .sb-future{background:var(--bg3);color:var(--text3);}
 .sched-add-btn{width:100%;margin-top:8px;padding:8px;background:var(--bg3);border:1px dashed var(--border2);border-radius:var(--radius-sm);font-family:var(--font-body);font-size:13px;color:var(--text3);cursor:pointer;}
+.sched-edit-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;padding:2px 4px;flex-shrink:0;line-height:1;}
+.sched-del-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;padding:2px 4px;flex-shrink:0;line-height:1;}
+.sched-edit-btn:hover{color:var(--accent);}
+.sched-del-btn:hover{color:var(--red);}
+.loan-edit-btn{background:none;border:1px solid var(--border);border-radius:8px;color:var(--text3);cursor:pointer;font-size:12px;padding:4px 10px;font-family:var(--font-body);margin-top:10px;}
+.loan-edit-btn:hover{color:var(--accent);border-color:var(--accent);}
 /* Add loan modal instalment rows */
 .inst-row{display:flex;gap:6px;align-items:center;margin-bottom:8px;}
 .inst-input{background:var(--bg2);border:1px solid var(--border2);border-radius:var(--radius-sm);padding:9px 10px;font-size:13px;font-family:var(--font-body);color:var(--text);outline:none;min-width:0;}
@@ -937,6 +943,8 @@ function buildLoanCard(l, isOwe) {
       out += '<div class="sched-date">' + dd.toLocaleDateString('en-SG', {day:'numeric',month:'short',year:'numeric'}) + '</div>';
       out += '<div class="sched-amts"><div class="sched-total" style="color:' + amtColor + ';">' + fmt(instTotal) + '</div><div class="sched-split">P: ' + fmt(inst.principal||0) + ' | I: ' + fmt(inst.interest||0) + '</div></div>';
       out += '<button class="sched-badge ' + badgeCls + '" onclick="toggleInstalment(\'' + l.id + '\',' + idx + ')">' + badgeLbl + '</button>';
+      out += '<button class="sched-edit-btn" onclick="openEditInstalment(\'' + l.id + '\',' + idx + ')" title="Edit">&#9998;</button>';
+      out += '<button class="sched-del-btn" onclick="deleteInstalment(\'' + l.id + '\',' + idx + ')" title="Delete">×</button>';
       out += '</div>';
     });
 
@@ -944,12 +952,14 @@ function buildLoanCard(l, isOwe) {
     out += '</div>'; // end sched-panel
 
     if (l.notes) out += '<div class="loan-note">' + l.notes + '</div>';
+    out += '<button class="loan-edit-btn" onclick="openEditLoan(\'' + l.id + '\',\'owe\')">&#9998; Edit loan details</button>';
 
   } else if (isOwe) {
     // ── I Owe without schedule yet ──
     out += '<div style="font-size:13px;color:var(--text3);margin-bottom:12px;">No repayment schedule added yet.</div>';
     if (l.notes) out += '<div class="loan-note">' + l.notes + '</div>';
     out += '<button class="loan-pay-btn" onclick="openAddInstalment(\'' + l.id + '\')">+ Add first instalment</button>';
+    out += '<button class="loan-edit-btn" onclick="openEditLoan(\'' + l.id + '\',\'owe\')">&#9998; Edit loan details</button>';
 
   } else {
     // ── Owed to Me: simple view ──
@@ -968,6 +978,7 @@ function buildLoanCard(l, isOwe) {
     } else {
       out += '<div style="text-align:center;font-size:13px;color:var(--green);padding-top:8px;">\u2713 Fully settled</div>';
     }
+    out += '<button class="loan-edit-btn" onclick="openEditLoan(\'' + l.id + '\',\'owed\')">&#9998; Edit loan details</button>';
   }
 
   out += '</div>'; // end loan-card
@@ -1153,6 +1164,127 @@ function recordPayment(id) {
   if (amount <= 0) { toast('Enter a valid amount'); return; }
   loan.paid = Math.min(loan.total, loan.paid + amount);
   save(); closeModal(); renderLoans(); toast('Payment recorded \u2713'); pushLoans();
+}
+
+function openEditInstalment(loanId, idx) {
+  var loan = null;
+  state.loans.owe.forEach(function(l) { if (l.id === loanId) loan = l; });
+  if (!loan || !loan.schedule || !loan.schedule[idx]) return;
+  var inst = loan.schedule[idx];
+  document.getElementById('modal-title').textContent = 'Edit instalment ' + (idx + 1);
+  document.getElementById('modal-body').innerHTML =
+    '<div class="form-group"><label class="form-label">Date</label>'
+    + '<input type="date" class="form-input" id="ei-date" value="' + inst.date + '"/></div>'
+    + '<div class="form-group"><label class="form-label">Principal (SGD)</label>'
+    + '<input type="number" class="form-input" id="ei-princ" value="' + (inst.principal || 0) + '" step="0.01" min="0" inputmode="decimal" oninput="updateEiTotal()"/></div>'
+    + '<div class="form-group"><label class="form-label">Interest (SGD)</label>'
+    + '<input type="number" class="form-input" id="ei-int" value="' + (inst.interest || 0) + '" step="0.01" min="0" inputmode="decimal" oninput="updateEiTotal()"/></div>'
+    + '<div style="display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid var(--border);margin-bottom:12px;">'
+    + '<span style="font-size:13px;color:var(--text2);">Total instalment</span>'
+    + '<span style="font-size:15px;font-weight:600;" id="ei-total">' + fmt((inst.principal||0) + (inst.interest||0)) + '</span></div>'
+    + '<button class="submit-btn" onclick="saveEditInstalment(\'' + loanId + '\',' + idx + ')" style="margin-bottom:0;">Save Changes</button>';
+  document.getElementById('modal-overlay').classList.add('show');
+}
+
+function updateEiTotal() {
+  var p = parseFloat(document.getElementById('ei-princ').value) || 0;
+  var i = parseFloat(document.getElementById('ei-int').value) || 0;
+  var el = document.getElementById('ei-total');
+  if (el) el.textContent = fmt(p + i);
+}
+
+function saveEditInstalment(loanId, idx) {
+  var loan = null;
+  state.loans.owe.forEach(function(l) { if (l.id === loanId) loan = l; });
+  if (!loan || !loan.schedule || !loan.schedule[idx]) return;
+  var date = document.getElementById('ei-date').value;
+  var princ = parseFloat(document.getElementById('ei-princ').value) || 0;
+  var interest = parseFloat(document.getElementById('ei-int').value) || 0;
+  if (!date) { toast('Please enter a date'); return; }
+  if (princ <= 0 && interest <= 0) { toast('Enter principal or interest amount'); return; }
+  var wasPaid = loan.schedule[idx].paid;
+  loan.schedule[idx] = { date: date, principal: princ, interest: interest, paid: wasPaid };
+  loan.schedule.sort(function(a, b) { return a.date.localeCompare(b.date); });
+  // Recalculate paid total
+  loan.paid = loan.schedule.reduce(function(s, inst) {
+    return s + (inst.paid ? (inst.principal||0) + (inst.interest||0) : 0);
+  }, 0);
+  loan.total = loan.schedule.reduce(function(s, inst) {
+    return s + (inst.principal||0) + (inst.interest||0);
+  }, 0);
+  save(); closeModal(); renderLoans(); toast('Instalment updated ✓'); pushLoans();
+  setTimeout(function() {
+    var el = document.getElementById('sched-' + loanId);
+    if (el) el.classList.add('open');
+  }, 50);
+}
+
+function deleteInstalment(loanId, idx) {
+  var loan = null;
+  state.loans.owe.forEach(function(l) { if (l.id === loanId) loan = l; });
+  if (!loan || !loan.schedule) return;
+  var inst = loan.schedule[idx];
+  var total = (inst.principal||0) + (inst.interest||0);
+  if (!confirm('Delete instalment ' + (idx+1) + ' (' + fmt(total) + ')? This cannot be undone.')) return;
+  loan.schedule.splice(idx, 1);
+  // Recalculate paid total
+  loan.paid = loan.schedule.reduce(function(s, inst2) {
+    return s + (inst2.paid ? (inst2.principal||0) + (inst2.interest||0) : 0);
+  }, 0);
+  loan.total = loan.schedule.reduce(function(s, inst2) {
+    return s + (inst2.principal||0) + (inst2.interest||0);
+  }, 0);
+  save(); renderLoans(); toast('Instalment deleted'); pushLoans();
+  setTimeout(function() {
+    var el = document.getElementById('sched-' + loanId);
+    if (el) el.classList.add('open');
+  }, 50);
+}
+
+function openEditLoan(loanId, tab) {
+  var loan = null;
+  state.loans[tab].forEach(function(l) { if (l.id === loanId) loan = l; });
+  if (!loan) return;
+  var isOwe = tab === 'owe';
+  document.getElementById('modal-title').textContent = 'Edit loan details';
+  var bodyHtml = '<div class="form-group"><label class="form-label">' + (isOwe ? 'Lender' : 'Borrower') + ' name</label>'
+    + '<input type="text" class="form-input" id="el-person" value="' + loan.person + '"/></div>';
+  if (!isOwe) {
+    bodyHtml += '<div class="form-group"><label class="form-label">Total amount (SGD)</label>'
+      + '<input type="number" class="form-input" id="el-total" value="' + loan.total + '" step="0.01" min="0" inputmode="decimal"/></div>';
+    bodyHtml += '<div class="form-group"><label class="form-label">Amount received (SGD)</label>'
+      + '<input type="number" class="form-input" id="el-paid" value="' + loan.paid + '" step="0.01" min="0" inputmode="decimal"/></div>';
+  }
+  bodyHtml += '<div class="form-group"><label class="form-label">Due date (optional)</label>'
+    + '<input type="date" class="form-input" id="el-due" value="' + (loan.due || '') + '"/></div>';
+  bodyHtml += '<div class="form-group"><label class="form-label">Notes (optional)</label>'
+    + '<textarea class="form-textarea" id="el-notes" style="min-height:64px;">' + (loan.notes || '') + '</textarea></div>';
+  bodyHtml += '<button class="submit-btn" onclick="saveEditLoan(\'' + loanId + '\',\'' + tab + '\')" style="margin-bottom:0;">Save Changes</button>';
+  document.getElementById('modal-body').innerHTML = bodyHtml;
+  document.getElementById('modal-overlay').classList.add('show');
+}
+
+function saveEditLoan(loanId, tab) {
+  var loan = null;
+  state.loans[tab].forEach(function(l) { if (l.id === loanId) loan = l; });
+  if (!loan) return;
+  var personEl = document.getElementById('el-person');
+  var person = personEl ? personEl.value.trim() : '';
+  if (!person) { toast('Please enter a name'); return; }
+  loan.person = person;
+  loan.due = document.getElementById('el-due') ? document.getElementById('el-due').value : '';
+  loan.notes = document.getElementById('el-notes') ? document.getElementById('el-notes').value.trim() : '';
+  if (tab === 'owed') {
+    var totalEl = document.getElementById('el-total');
+    var paidEl = document.getElementById('el-paid');
+    var newTotal = totalEl ? (parseFloat(totalEl.value) || 0) : loan.total;
+    var newPaid = paidEl ? (parseFloat(paidEl.value) || 0) : loan.paid;
+    if (newTotal <= 0) { toast('Enter a valid amount'); return; }
+    if (newPaid > newTotal) { toast('Paid cannot exceed total'); return; }
+    loan.total = newTotal;
+    loan.paid = newPaid;
+  }
+  save(); closeModal(); renderLoans(); toast('Loan updated ✓'); pushLoans();
 }
 
 function deleteLoan(id) {
